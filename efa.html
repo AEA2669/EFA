@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>DFW AADC – Live EDICT Viewer</title>
+
+<style>
+  body {
+    font-family: system-ui, sans-serif;
+    margin: 20px;
+    background: #f5f7fa;
+    color: #222;
+  }
+  h1 { margin-bottom: 0.25rem; }
+  h2 { margin-top: 2rem; }
+  .meta {
+    font-size: 0.9rem;
+    color: #555;
+    margin-bottom: 1rem;
+  }
+  button {
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    border: none;
+    background: #005eb8;
+    color: #fff;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  select {
+    padding: 0.4rem;
+    border-radius: 4px;
+    border: 1px solid #ccc;
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin-top: 0.75rem;
+    background: #fff;
+  }
+  th, td {
+    border: 1px solid #ddd;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.9rem;
+  }
+  th {
+    background: #e9edf5;
+    text-align: left;
+  }
+  .pill {
+    display: inline-block;
+    padding: 0.15rem 0.4rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .pill-edict {
+    background: #005eb8;
+    color: #fff;
+  }
+  .pill-none {
+    background: #ccc;
+    color: #222;
+  }
+  .error {
+    color: #b00020;
+    margin-top: 0.75rem;
+    font-size: 0.9rem;
+  }
+  .flex-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+  .count {
+    font-size: 0.9rem;
+    color: #333;
+  }
+</style>
+</head>
+
+<body>
+<h1>DFW AADC – Live EDICT Viewer</h1>
+<div class="meta">
+  FAA source snapshot: <code id="relayUrlDisplay"></code>
+</div>
+
+<div class="flex-row">
+  <button id="refreshBtn">Refresh Now</button>
+  <label>Airline Filter:</label>
+  <select id="airlineFilter">
+    <option value="ALL">All Airlines</option>
+    <option value="AA">AA – American Airlines</option>
+    <option value="DL">Delta</option>
+    <option value="UA">United</option>
+    <option value="WN">Southwest</option>
+  </select>
+  <span id="counts" class="count"></span>
+</div>
+
+<div id="error" class="error"></div>
+
+<h2>Flights with EDICT</h2>
+<table id="edictTable">
+  <thead>
+    <tr>
+      <th>Carrier</th>
+      <th>Flight</th>
+      <th>Origin</th>
+      <th>Destination</th>
+      <th>EDICT / EDCT</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<h2>Flights without EDICT</h2>
+<table id="noEdictTable">
+  <thead>
+    <tr>
+      <th>Carrier</th>
+      <th>Flight</th>
+      <th>Origin</th>
+      <th>Destination</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<script>
+const FAA_URL = "https://www.fly.faa.gov/aadc/api/airports/DFW";
+const DATA_URL = "./faa-dfw.json";
+
+document.getElementById("relayUrlDisplay").textContent = DATA_URL;
+
+const refreshBtn = document.getElementById("refreshBtn");
+const airlineFilter = document.getElementById("airlineFilter");
+const countsEl = document.getElementById("counts");
+const errorEl = document.getElementById("error");
+const edictTbody = document.querySelector("#edictTable tbody");
+const noEdictTbody = document.querySelector("#noEdictTable tbody");
+
+function getCarrier(f) {
+  const carrier = f.carrier || f.airline || f.operator || f.majorAirline || "";
+  return carrier === "AAL" ? "AA" : carrier;
+}
+function getFlightNumber(f) {
+  return f.flightNumber || f.flight || f.callsign || f.acid || f.id || "";
+}
+function getOrigin(f) {
+  return f.origin || f.depAirport || f.departure || "";
+}
+function getDestination(f) {
+  return f.destination || f.arrAirport || f.arrival || "";
+}
+function getStatus(f) {
+  return f.status || f.phase || f.edictStatus || "";
+}
+function getEdictValue(f) {
+  return (
+    f.EDICT ||
+    f.EDCT ||
+    f.edict ||
+    f.edct ||
+    f.edictTime ||
+    f.edctTime ||
+    null
+  );
+}
+
+function renderRowWithEdict(f, edictValue) {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td>${getCarrier(f)}</td>
+    <td>${getFlightNumber(f)}</td>
+    <td>${getOrigin(f)}</td>
+    <td>${getDestination(f)}</td>
+    <td><span class="pill pill-edict">${edictValue}</span></td>
+    <td>${getStatus(f)}</td>
+  `;
+  return tr;
+}
+
+function renderRowWithoutEdict(f) {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td>${getCarrier(f)}</td>
+    <td>${getFlightNumber(f)}</td>
+    <td>${getOrigin(f)}</td>
+    <td>${getDestination(f)}</td>
+    <td><span class="pill pill-none">${getStatus(f) || "N/A"}</span></td>
+  `;
+  return tr;
+}
+
+function parseRelayJson(text) {
+  const cleanedText = text.replace(/^\uFEFF/, "").trim();
+
+  try {
+    return JSON.parse(cleanedText);
+  } catch (firstError) {
+    const firstObject = cleanedText.indexOf("{");
+    const lastObject = cleanedText.lastIndexOf("}");
+    if (firstObject >= 0 && lastObject > firstObject) {
+      try {
+        return JSON.parse(cleanedText.slice(firstObject, lastObject + 1));
+      } catch {
+        // Keep the original parse error below for a useful message.
+      }
+    }
+    throw firstError;
+  }
+}
+
+async function loadFlights() {
+  errorEl.textContent = "";
+  edictTbody.innerHTML = "";
+  noEdictTbody.innerHTML = "";
+  countsEl.textContent = "Loading…";
+
+  try {
+    const res = await fetch(DATA_URL, { cache: "no-store" });
+    if (!res.ok) throw new Error(`Snapshot HTTP ${res.status}`);
+
+    const text = await res.text();
+    let data;
+    try {
+      data = parseRelayJson(text);
+    } catch {
+      throw new Error("Snapshot did not contain valid JSON:\n" + text.slice(0, 200) + "...");
+    }
+
+    const flights = Array.isArray(data)
+      ? data
+      : (data.flights || data.data || data.timeBuckets?.flatMap(bucket =>
+          (bucket.flights || []).map(flight => ({
+            ...flight,
+            edict: Number(
+              (bucket.counts || []).find(count => count.name === "EDCT Issued")?.count || 0
+            ) > 0 ? "EDCT Issued" : null,
+            status: Number(
+              (bucket.counts || []).find(count => count.name === "EDCT Issued")?.count || 0
+            ) > 0 ? "EDCT Issued" : "Departing"
+          }))
+        ) || []);
+    if (!Array.isArray(flights)) {
+      throw new Error("Unexpected response format – expected an array of flights.");
+    }
+
+    const filter = airlineFilter.value;
+    let withEdict = 0;
+    let withoutEdict = 0;
+
+    flights.forEach(f => {
+      const carrier = getCarrier(f);
+      if (filter !== "ALL" && carrier !== filter) return;
+
+      const edictValue = getEdictValue(f);
+      if (edictValue) {
+        withEdict++;
+        edictTbody.appendChild(renderRowWithEdict(f, edictValue));
+      } else {
+        withoutEdict++;
+        noEdictTbody.appendChild(renderRowWithoutEdict(f));
+      }
+    });
+
+    countsEl.textContent = `With EDICT: ${withEdict} | Without EDICT: ${withoutEdict}`;
+  } catch (err) {
+    errorEl.textContent = "Error loading data: " + err.message;
+    countsEl.textContent = "";
+  }
+}
+
+refreshBtn.addEventListener("click", loadFlights);
+airlineFilter.addEventListener("change", loadFlights);
+
+// Auto-refresh every 30 seconds
+setInterval(loadFlights, 30000);
+
+// Initial load
+loadFlights();
+</script>
+</body>
+</html>
